@@ -1,0 +1,136 @@
+# Setup
+
+```{r}
+library(dplyr)
+library(stringr)
+library(haven)
+library(stargazer)
+
+original_data <- read_dta("./cen_ind_2021_pumf_v2.dta")
+```
+
+## Data Cleaning
+
+Here we are setting up the data for our Analysis. What we are doing here is filtering out the population we need for our analysis:
+
+-   Agegroup 60 - 64, 65 - 69
+
+-   Remove NA for Labour Force status(lfact) and Immigration Status(immstat)
+
+```{r}
+my_data <- original_data %>%
+  mutate(across(where(is.labelled), as_factor)) %>%
+  filter(agegrp %in% c("60 to 64 years", "65 to 69 years")) %>%
+  filter(lfact != "Not available", immstat != "Not applicable")
+```
+
+Here we are determining eligible for OAS
+
+-   Person is in labour force if they are either employed or unemployed or 1(employed or self employed)
+
+-   Person is in treatable group age is '65 - 69'
+
+-   Eligible if (immigrant && years_in_canada \>=) 10 or Non-immigrant(Canadian born) We also convert covariates into categorical data
+
+```{r}
+my_data <- my_data %>%
+  mutate(
+    in_labour_force = ifelse(lfact == "1" | grepl("Employed", lfact) | grepl("Unemployed", lfact), 1, 0),
+    
+    treated_age = ifelse(agegrp == "65 to 69 years", 1, 0),
+    
+    yrim_numeric = ifelse(immstat == "Immigrants", 
+                          as.numeric(as.character(yrim)), 
+                          NA),
+    
+    years_in_can = 2021 - yrim_numeric,
+    
+    is_eligible = case_when(
+      immstat == "Non-immigrants" ~ 1,
+      immstat == "Immigrants" & years_in_can >= 10 ~ 1,
+      immstat == "Immigrants" & years_in_can < 10  ~ 0,
+      TRUE ~ 0
+    ),
+    
+    education   = as.factor(hdgree),
+    hh_income   = as.factor(HHInc_AT),  
+    gender      = as.factor(Gender),    
+    marital     = as.factor(marsth),
+    province    = as.factor(pr),
+    income      = as.factor(TotInc_AT)
+  )
+```
+
+## DD Regression
+
+In this our treatment is the is_eligible, if a person is eligible to get treated at go time which in this is at age 65.
+
+$$ 
+\begin{align}
+  \text{M1}: Y_i &= \beta_0 + \beta_1 \, D_i + \beta_2 \, T_i + \beta_3 \, (D_i \times T_i) +     \varepsilon_i \\
+\end{align} 
+$$
+
+Cheese
+
+$$
+\begin{align}
+  \text{Variable meanings} \\ 
+  D_i &= \text{Elegibilty for OAS} \\
+  T_i &= \text{Go-time 65+}
+\end{align}
+$$
+
+```{r}
+# Simple Regresssion
+m1 <- lm(in_labour_force ~ is_eligible + treated_age + is_eligible:treated_age, data = my_data)
+# Regression with covariates, no factors
+m2 <- lm(in_labour_force ~ is_eligible + treated_age + is_eligible:treated_age + gender , data = my_data)
+# Regression with covariates, including factors house hold income and education
+m3 <- lm(in_labour_force ~ is_eligible + treated_age + is_eligible:treated_age + gender +
+           education + hh_income + marital + province + income, 
+         data = my_data)
+
+stargazer(m1, m2, m3, 
+          add.lines = list(
+        c("Demographic controls", "No", "Yes", "Yes"),
+        c("Categorical controls as factors", "No", "No", "Yes")
+  ),
+          omit = c("education", "hh_income", "marital", "gender", "Constant", "province", "income"),
+          omit.stat = c("f", "ser"),
+          type = "text")
+```
+
+```{r}
+table_data <- my_data %>%
+  mutate(
+    Participation = in_labour_force,
+    Age_65_Plus   = treated_age,
+    Eligible      = is_eligible,
+    Male          = ifelse(as.numeric(Gender) %in% c(2), 1, 0),
+    Is_Married    = ifelse(as.numeric(marital) %in% c(2), 1, 0),
+    HH_Income     = ifelse(as.numeric(hh_income) > 23, 1, 0),
+    Uni_Degree    = ifelse(as.numeric(education) %in% c(9, 10, 11), 1, 0),
+    Diploma       = ifelse(as.numeric(education) %in% c(2,3), 1, 0),
+    Per_income    = ifelse(income > 90000, 1, 0)
+    
+  ) %>%
+  select(Participation, Age_65_Plus, Eligible, Male, Is_Married, HH_Income, Per_income, Uni_Degree, Diploma, )
+stargazer(as.data.frame(table_data), 
+          type = "text", 
+          title = "Summary for variables of interest",
+          digits = 2,
+          summary.stat = c("mean", "sd", "min", "max"),
+          covariate.labels = c("Labour Force Status", 
+                               "Age 65+", 
+                               "OAS Eligible",
+                               "Gender (Male = 1)", 
+                               "Married", 
+                               "HH Income",
+                               "Per Income",
+                               "University Degree",
+                               "Diploma"
+                           ),
+          notes = c("Sample Size of N = 126,446", "Used 90,000 as the middle point for both Income"),
+          notes.append = TRUE)
+```
